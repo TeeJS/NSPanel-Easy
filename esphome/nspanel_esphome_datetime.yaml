@@ -62,12 +62,15 @@ script:
           const bool has_meridiem = (time_format_str.find("%p") != std::string::npos);
 
           if (id(screensaver_display_time) and current_page_id == get_page_id("screensaver")) {
+            // Screensaver Phase 1: render the time on a single horizontal line.
+            // Drop the meridiem (%p) so "11:39 AM" becomes "11:39" and always fits
+            // the 320px width, and do NOT split ':'/spaces onto separate rows.
             std::string time_format_str_sleep = time_format_str;
-            nspanel_easy::replace_all(time_format_str_sleep, "%p", meridiem_text);
-            if (display_model->current_option() == "${DISPLAY_MODES.US.TEXT}") {
-              nspanel_easy::replace_all(time_format_str_sleep, ":", "\\r");
-              nspanel_easy::replace_all(time_format_str_sleep, " ", "\\r");
-            }
+            nspanel_easy::replace_all(time_format_str_sleep, "%p", "");
+            while (!time_format_str_sleep.empty() && time_format_str_sleep.front() == ' ')
+              time_format_str_sleep.erase(time_format_str_sleep.begin());
+            while (!time_format_str_sleep.empty() && time_format_str_sleep.back() == ' ')
+              time_format_str_sleep.pop_back();
             disp1->set_component_text("text", now.strftime(time_format_str_sleep).c_str());
             disp1->show_component("text");
           }
