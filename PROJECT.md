@@ -10,17 +10,46 @@ Local customization of NSPanel-Easy's screensaver time display. Not intended for
 4. **Deployment target / backup:** Sonoff NSPanel (portrait, 320×480), flashed via ESPHome from this repo's YAML packages. Backup = git (repo is version-controlled; every change is revertable).
 5. **Verify it is done:** After reflashing, the screensaver shows the time on one line at the chosen font size. (Cannot be tested on this machine — requires an ESPHome build + flash to the panel.)
 
+## End-state vision
+
+A DVD-logo-style **bouncing clock** on the screensaver: the time (e.g. `11:39`) drifts
+around the screen, bounces off the four edges, and changes color — all slow and calm, with
+speeds adjustable live from Home Assistant. Reference: https://bouncingdvdlogo.com/ (but slower).
+
+### Home Assistant controls (new ESPHome entities on each panel)
+- **Select — "Screensaver Color Mode"**: `Continuous shift` · `On bounce` · `Off/static`
+  - *Continuous shift* → color cycles the spectrum on its own timer (Color Speed applies).
+  - *On bounce* → classic DVD: color changes only when it hits an edge.
+- **Number — "Screensaver Motion Speed"**: drift speed (both moving modes).
+- **Number — "Screensaver Color Speed"**: spectrum cycle rate (Continuous mode).
+
+### Rendering approach (confirmed feasible, code-only)
+Drive the animation from an ESPHome interval while the screensaver is shown. Each tick:
+move the clock a small step, bounce velocity at edges, advance color, then redraw via Nextion
+serial draw commands — `xstr` to paint the time at the computed x/y, `fill` to wipe the prior
+position. The full-screen `text` component is hidden while bounce mode is active.
+No TFT rebuild expected. (`xstr`/`fill` already used inside the HMI — button.txt, switch.txt.)
+Movement is stepwise at a low frame rate; fine because the target is deliberately slow.
+
 ## Phases
 
-- **Phase 1 — Horizontal alignment** *(in progress)*
-  - Decision: show `HH:MM` only, **drop AM/PM**, so it always fits one line.
-  - Change: `esphome/nspanel_esphome_datetime.yaml` — screensaver branch no longer replaces `:`/space with `\r`; strips `%p`.
+- **Phase 1 — Horizontal alignment** *(DONE — commit d5c3389, pushed to fork main)*
+  - Show `HH:MM` only, **drop AM/PM**, so it always fits one line.
+  - `esphome/nspanel_esphome_datetime.yaml` — screensaver branch strips `%p`, no `\r` splitting.
   - Code-only. No Nextion/TFT rebuild.
-- **Phase 2 — Color cycling** *(not started)*
-  - Cycle `text.pco` through colors on an ESPHome interval timer. Code-only, no TFT rebuild.
-- **Phase 3 — DVD-style bounce** *(not started)*
-  - Drive `text.x`/`text.y` from ESPHome to bounce the clock off the screen edges.
-  - Likely needs an HMI/TFT edit (shrink the `text` box from full-screen to clock-sized, handle trail-clearing) in the Nextion Editor. To be scoped when we get there.
+- **Phase 2 — Color engine + HA controls** *(DONE — pending on-device test)*
+  - New package `esphome/nspanel_esphome_addon_screensaver_motion.yaml`, included via `core.yaml`
+    so all panels get it automatically. Adds HA entities: Color Mode select
+    (Off / Continuous shift / On bounce), Color Speed number, Motion Speed number
+    (Motion Speed defined now, used in Phase 3).
+  - 250 ms interval cycles hue -> RGB565 -> `text.pco` while screensaver shows the clock in
+    Continuous mode; only redraws on actual color change. Default mode Off = no behaviour change.
+  - Note: in Phase 2 only "Continuous shift" is visible; "On bounce" needs motion (Phase 3).
+  - Code-only, no TFT rebuild.
+- **Phase 3 — Bounce motion** *(not started)*
+  - Add Motion Speed number + the `xstr`/`fill` animation loop; bounce the time around,
+    wire "On bounce" color changes. Hide the static `text` component during bounce mode.
+  - Code-only *if* on-device verification of serial `xstr`/`fill` holds (high confidence).
 
 ## Notes / Architecture
 

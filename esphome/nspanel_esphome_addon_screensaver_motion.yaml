@@ -1,0 +1,126 @@
+#####################################################################################################
+#####                 NSPanel Easy - https://github.com/edwardtfn/NSPanel-Easy                  #####
+#####################################################################################################
+##### ESPHOME ADDON - Screensaver Motion & Color                                                #####
+##### Local customization (TeeJS fork): animated screensaver clock.                             #####
+#####                                                                                           #####
+##### Phase 2 (this file): color engine + Home Assistant controls.                             #####
+#####   - Select  "Screensaver Color Mode": Off / Continuous shift / On bounce                 #####
+#####   - Number  "Screensaver Color Speed": spectrum cycle rate (Continuous mode)             #####
+#####   - Number  "Screensaver Motion Speed": drift speed (wired up in Phase 3)                #####
+##### Everything is controlled from HA, per panel. Default mode is Off (no behaviour change).   #####
+#####################################################################################################
+
+---
+substitutions:
+  TAG_SS_MOTION: nspanel.screensaver.motion
+  # Color Mode option labels (kept as plain literals; these are new HA-native entities,
+  # not display components, so they don't interact with the Blueprint).
+  SS_MODE_OFF: "Off"
+  SS_MODE_CONTINUOUS: "Continuous shift"
+  SS_MODE_BOUNCE: "On bounce"
+
+esphome:
+  platformio_options:
+    build_flags:
+      - -D NSPANEL_EASY_ADDON_SCREENSAVER_MOTION
+
+globals:
+  # Current hue (0-360) for the continuous color shift.
+  - id: ss_motion_hue
+    type: float
+    restore_value: false
+    initial_value: '0.0f'
+  # Last RGB565 value pushed to the clock, to avoid redundant redraws.
+  - id: ss_motion_last_color
+    type: uint16_t
+    restore_value: false
+    initial_value: '0xFFFF'
+
+select:
+  - id: screensaver_color_mode
+    name: Screensaver Color Mode
+    platform: template
+    options:
+      - ${SS_MODE_OFF}
+      - ${SS_MODE_CONTINUOUS}
+      - ${SS_MODE_BOUNCE}
+    initial_option: ${SS_MODE_OFF}
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    icon: mdi:palette
+    update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            // When leaving an active color mode, restore the configured static color
+            // so the clock doesn't stay stuck on the last cycled hue.
+            if (x != "${SS_MODE_CONTINUOUS}"
+                and current_page_id == get_page_id("screensaver")
+                and id(screensaver_display_time)) {
+              disp1->send_command_printf("text.pco=%u", id(screensaver_display_time_color));
+              id(ss_motion_last_color) = id(screensaver_display_time_color);
+            }
+
+number:
+  - id: screensaver_color_speed
+    name: Screensaver Color Speed
+    platform: template
+    entity_category: config
+    min_value: 1
+    max_value: 100
+    initial_value: 20
+    step: 1
+    restore_value: true
+    optimistic: true
+    icon: mdi:speedometer
+    update_interval: never
+
+  - id: screensaver_motion_speed
+    name: Screensaver Motion Speed
+    platform: template
+    entity_category: config
+    min_value: 1
+    max_value: 100
+    initial_value: 20
+    step: 1
+    restore_value: true
+    optimistic: true
+    icon: mdi:speedometer-medium
+    update_interval: never
+
+interval:
+  # Drives the in-place color shift. Cheap early-outs keep it idle unless the
+  # screensaver is showing the clock in Continuous mode.
+  - interval: 250ms
+    then:
+      - lambda: |-
+          if (current_page_id != get_page_id("screensaver")) return;
+          if (!id(screensaver_display_time)) return;
+          if (id(screensaver_color_mode)->state != "${SS_MODE_CONTINUOUS}") return;
+
+          // Advance hue. Speed 1..100 maps to a slow..fast drift through the spectrum.
+          const float speed = id(screensaver_color_speed)->state;  // 1..100
+          id(ss_motion_hue) += speed * 0.1f;  // degrees per 250 ms tick
+          while (id(ss_motion_hue) >= 360.0f) id(ss_motion_hue) -= 360.0f;
+
+          // HSV (S=V=1) -> RGB -> RGB565
+          const float h = id(ss_motion_hue);
+          const float c = 1.0f;
+          const float xx = c * (1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f));
+          float r = 0, g = 0, b = 0;
+          if      (h <  60.0f) { r = c;  g = xx; b = 0;  }
+          else if (h < 120.0f) { r = xx; g = c;  b = 0;  }
+          else if (h < 180.0f) { r = 0;  g = c;  b = xx; }
+          else if (h < 240.0f) { r = 0;  g = xx; b = c;  }
+          else if (h < 300.0f) { r = xx; g = 0;  b = c;  }
+          else                 { r = c;  g = 0;  b = xx; }
+          const uint8_t R = static_cast<uint8_t>(r * 255.0f);
+          const uint8_t G = static_cast<uint8_t>(g * 255.0f);
+          const uint8_t B = static_cast<uint8_t>(b * 255.0f);
+          const uint16_t color = ((R & 0xF8) << 8) | ((G & 0xFC) << 3) | (B >> 3);
+
+          if (color == id(ss_motion_last_color)) return;  // no visible change; skip redraw
+          id(ss_motion_last_color) = color;
+          disp1->send_command_printf("text.pco=%u", color);
