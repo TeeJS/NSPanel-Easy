@@ -101,6 +101,10 @@ globals:
     type: std::string
     restore_value: false
     initial_value: '""'
+  - id: ss_prev_color
+    type: uint16_t
+    restore_value: false
+    initial_value: '0xFFFF'
 
 select:
   - id: screensaver_color_mode
@@ -202,7 +206,7 @@ interval:
 
           // ---- Advance position; bounce at the walls ----
           const float mspeed = id(screensaver_motion_speed)->state;   // 1..100
-          const float step = 0.2f + mspeed * 0.06f;                   // px per frame
+          const float step = 0.05f + mspeed * 0.03f;                  // px per frame (gentle)
           bool bounced = false;
 
           float nx = id(ss_x) + id(ss_vx) * step;
@@ -251,22 +255,46 @@ interval:
 
           const uint16_t bco = id(screensaver_background_color);
 
-          // ---- Erase previous frame (over-print old glyphs in background color) ----
-          if (id(ss_have_prev)) {
-            disp1->send_command_printf("xstr %d,%d,%d,%d,%d,%u,%u,1,1,3,\"%s\"",
-                id(ss_prev_x), id(ss_prev_y), id(ss_prev_w), id(ss_prev_h),
-                id(ss_prev_font), bco, bco, id(ss_prev_str).c_str());
+          // ---- Nothing visibly changed? Skip the redraw entirely. ----
+          // This self-throttles slow motion (the clock only repaints when it has
+          // actually moved a whole pixel, changed color, or the minute rolled over),
+          // which is the single biggest flicker reducer.
+          if (id(ss_have_prev)
+              && ix == id(ss_prev_x) && iy == id(ss_prev_y)
+              && color == id(ss_prev_color) && font == id(ss_prev_font)
+              && id(ss_time_str) == id(ss_prev_str)) {
+            return;
           }
 
-          // ---- Draw the clock at the new position ----
-          disp1->send_command_printf("xstr %d,%d,%d,%d,%d,%u,%u,1,1,3,\"%s\"",
+          // ---- Draw the clock at the new position as ONE opaque box (sta=1). ----
+          // The opaque background paint overwrites the old glyphs wherever the new box
+          // overlaps the old one, so the clock is never blanked first -> far less flicker
+          // than the previous erase-then-redraw.
+          disp1->send_command_printf("xstr %d,%d,%d,%d,%d,%u,%u,1,1,1,\"%s\"",
               ix, iy, bw, bh, font, color, bco, id(ss_time_str).c_str());
 
-          // ---- Remember this frame so we can erase it next time ----
+          // ---- Clear only the thin strip the box just vacated (its trailing edges). ----
+          if (id(ss_have_prev)) {
+            const int px = id(ss_prev_x), py = id(ss_prev_y);
+            const int pw = id(ss_prev_w), ph = id(ss_prev_h);
+            if (font != id(ss_prev_font)) {
+              disp1->send_command_printf("fill %d,%d,%d,%d,%u", px, py, pw, ph, bco);
+            } else {
+              const int dx = ix - px;
+              const int dy = iy - py;
+              if (dx > 0)      disp1->send_command_printf("fill %d,%d,%d,%d,%u", px, py, dx, ph, bco);
+              else if (dx < 0) disp1->send_command_printf("fill %d,%d,%d,%d,%u", ix + bw, py, -dx, ph, bco);
+              if (dy > 0)      disp1->send_command_printf("fill %d,%d,%d,%d,%u", px, py, pw, dy, bco);
+              else if (dy < 0) disp1->send_command_printf("fill %d,%d,%d,%d,%u", px, iy + bh, pw, -dy, bco);
+            }
+          }
+
+          // ---- Remember this frame ----
           id(ss_prev_x) = ix;
           id(ss_prev_y) = iy;
           id(ss_prev_w) = bw;
           id(ss_prev_h) = bh;
           id(ss_prev_font) = font;
           id(ss_prev_str) = id(ss_time_str);
+          id(ss_prev_color) = color;
           id(ss_have_prev) = true;
