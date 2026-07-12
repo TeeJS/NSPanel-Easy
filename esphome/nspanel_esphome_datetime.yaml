@@ -71,16 +71,8 @@ script:
               time_format_str_sleep.erase(time_format_str_sleep.begin());
             while (!time_format_str_sleep.empty() && time_format_str_sleep.back() == ' ')
               time_format_str_sleep.pop_back();
-            const std::string sleep_str = now.strftime(time_format_str_sleep);
-
-            // Publish the current clock string for the screensaver animator (addon).
-            // While a moving Color Mode is active the animator owns the display and
-            // draws the clock itself, so leave the stock centered component hidden.
-            id(ss_time_str) = sleep_str;
-            if (id(screensaver_color_mode)->state == "Off") {
-              disp1->set_component_text("text", sleep_str.c_str());
-              disp1->show_component("text");
-            }
+            disp1->set_component_text("text", now.strftime(time_format_str_sleep).c_str());
+            disp1->show_component("text");
           }
 
           // Resolve %p for home page — strip from time string, set meridiem component separately
