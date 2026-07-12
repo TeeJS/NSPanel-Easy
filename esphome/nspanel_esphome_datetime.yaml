@@ -73,15 +73,11 @@ script:
               time_format_str_sleep.pop_back();
             const std::string sleep_str = now.strftime(time_format_str_sleep);
 
-            // When a screensaver motion mode is active, the animator owns the display
-            // (it draws the clock via xstr at a moving position). Just publish the
-            // current string for it and leave the stock centered component hidden.
-            bool animator_owns = false;
-            #ifdef NSPANEL_EASY_ADDON_SCREENSAVER_MOTION
+            // Publish the current clock string for the screensaver animator (addon).
+            // While a moving Color Mode is active the animator owns the display and
+            // draws the clock itself, so leave the stock centered component hidden.
             id(ss_time_str) = sleep_str;
-            animator_owns = (id(screensaver_color_mode)->state != "Off");
-            #endif
-            if (!animator_owns) {
+            if (id(screensaver_color_mode)->state == "Off") {
               disp1->set_component_text("text", sleep_str.c_str());
               disp1->show_component("text");
             }
