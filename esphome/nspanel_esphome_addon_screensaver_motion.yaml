@@ -2,23 +2,37 @@
 #####                 NSPanel Easy - https://github.com/edwardtfn/NSPanel-Easy                  #####
 #####################################################################################################
 ##### ESPHOME ADDON - Screensaver Motion & Color                                                #####
-##### Local customization (TeeJS fork): animated screensaver clock.                             #####
+##### Local customization (TeeJS fork): animated "DVD bounce" screensaver clock.                #####
 #####                                                                                           #####
-##### Phase 2 (this file): color engine + Home Assistant controls.                             #####
-#####   - Select  "Screensaver Color Mode": Off / Continuous shift / On bounce                 #####
-#####   - Number  "Screensaver Color Speed": spectrum cycle rate (Continuous mode)             #####
-#####   - Number  "Screensaver Motion Speed": drift speed (wired up in Phase 3)                #####
-##### Everything is controlled from HA, per panel. Default mode is Off (no behaviour change).   #####
+##### Controlled entirely from Home Assistant, per panel:                                       #####
+#####   Select  "Screensaver Color Mode":                                                       #####
+#####     - Off              -> static centered clock, static color (stock behaviour)           #####
+#####     - Continuous shift -> clock bounces AND color smoothly cycles (Color Speed)           #####
+#####     - On bounce        -> clock bounces AND color changes on each edge hit (Motion Speed) #####
+#####   Number  "Screensaver Color Speed"  : spectrum cycle rate (Continuous mode)              #####
+#####   Number  "Screensaver Motion Speed" : drift speed (both moving modes)                    #####
+#####                                                                                           #####
+##### Rendering: an interval draws the time with the Nextion `xstr` command at a moving         #####
+##### position and erases the previous frame by over-printing it in the background color        #####
+##### (no TFT rebuild). The stock centered `text` component is hidden while a moving mode is     #####
+##### active. Default mode is Off, so nothing changes until selected in HA.                      #####
 #####################################################################################################
 
 ---
 substitutions:
   TAG_SS_MOTION: nspanel.screensaver.motion
-  # Color Mode option labels (kept as plain literals; these are new HA-native entities,
-  # not display components, so they don't interact with the Blueprint).
+  # Color Mode option labels (new HA-native entities; not display components).
   SS_MODE_OFF: "Off"
   SS_MODE_CONTINUOUS: "Continuous shift"
   SS_MODE_BOUNCE: "On bounce"
+  # Play area in display pixels (screen is 320x480). Top/bottom insets keep the
+  # clock clear of the chips row (top) and the hardware-button bars (bottom).
+  SS_AREA_LEFT: '0'
+  SS_AREA_RIGHT: '320'
+  SS_AREA_TOP: '40'
+  SS_AREA_BOTTOM: '440'
+  # Animation frame period. Slower motion is the goal, so a modest rate is fine.
+  SS_FRAME_MS: '100ms'
 
 esphome:
   platformio_options:
@@ -26,16 +40,67 @@ esphome:
       - -D NSPANEL_EASY_ADDON_SCREENSAVER_MOTION
 
 globals:
-  # Current hue (0-360) for the continuous color shift.
-  - id: ss_motion_hue
+  # Current time string to draw (published by datetime refresh; HH:MM, no AM/PM).
+  - id: ss_time_str
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  # Hue (0-360) for color generation.
+  - id: ss_hue
     type: float
     restore_value: false
     initial_value: '0.0f'
-  # Last RGB565 value pushed to the clock, to avoid redundant redraws.
-  - id: ss_motion_last_color
-    type: uint16_t
+  # Live position (top-left of the text box) and velocity direction (+/-1).
+  - id: ss_x
+    type: float
     restore_value: false
-    initial_value: '0xFFFF'
+    initial_value: '120.0f'
+  - id: ss_y
+    type: float
+    restore_value: false
+    initial_value: '200.0f'
+  - id: ss_vx
+    type: float
+    restore_value: false
+    initial_value: '1.0f'
+  - id: ss_vy
+    type: float
+    restore_value: false
+    initial_value: '1.0f'
+  # Whether a moving mode is currently animating (owns the display).
+  - id: ss_active
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Previous frame's draw parameters, used to erase it before drawing the next.
+  - id: ss_have_prev
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: ss_prev_x
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: ss_prev_y
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: ss_prev_w
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: ss_prev_h
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: ss_prev_font
+    type: int
+    restore_value: false
+    initial_value: '6'
+  - id: ss_prev_str
+    type: std::string
+    restore_value: false
+    initial_value: '""'
 
 select:
   - id: screensaver_color_mode
@@ -51,17 +116,6 @@ select:
     entity_category: config
     icon: mdi:palette
     update_interval: never
-    on_value:
-      then:
-        - lambda: |-
-            // When leaving an active color mode, restore the configured static color
-            // so the clock doesn't stay stuck on the last cycled hue.
-            if (x != "${SS_MODE_CONTINUOUS}"
-                and current_page_id == get_page_id("screensaver")
-                and id(screensaver_display_time)) {
-              disp1->send_command_printf("text.pco=%u", id(screensaver_display_time_color));
-              id(ss_motion_last_color) = id(screensaver_display_time_color);
-            }
 
 number:
   - id: screensaver_color_speed
@@ -91,36 +145,128 @@ number:
     update_interval: never
 
 interval:
-  # Drives the in-place color shift. Cheap early-outs keep it idle unless the
-  # screensaver is showing the clock in Continuous mode.
-  - interval: 250ms
+  - interval: ${SS_FRAME_MS}
     then:
       - lambda: |-
-          if (current_page_id != get_page_id("screensaver")) return;
-          if (!id(screensaver_display_time)) return;
-          if (id(screensaver_color_mode)->state != "${SS_MODE_CONTINUOUS}") return;
+          // ---- Gate: only run on the screensaver page with the clock enabled ----
+          if (current_page_id != get_page_id("screensaver") || !id(screensaver_display_time)) {
+            id(ss_active) = false;      // release; re-init on next entry
+            id(ss_have_prev) = false;
+            return;
+          }
 
-          // Advance hue. Speed 1..100 maps to a slow..fast drift through the spectrum.
-          const float speed = id(screensaver_color_speed)->state;  // 1..100
-          id(ss_motion_hue) += speed * 0.1f;  // degrees per 250 ms tick
-          while (id(ss_motion_hue) >= 360.0f) id(ss_motion_hue) -= 360.0f;
+          const std::string mode = id(screensaver_color_mode)->state;
+          const bool moving = (mode != "${SS_MODE_OFF}");
+
+          // ---- Off (or just switched to Off): hand the display back to the stock clock ----
+          if (!moving) {
+            if (id(ss_active)) {
+              id(ss_active) = false;
+              if (id(ss_have_prev)) {   // wipe the last painted frame
+                disp1->send_command_printf("fill %d,%d,%d,%d,%u",
+                    id(ss_prev_x), id(ss_prev_y), id(ss_prev_w), id(ss_prev_h),
+                    id(screensaver_background_color));
+                id(ss_have_prev) = false;
+              }
+              disp1->send_command("vis text,1");   // restore the centered component
+              refresh_datetime->execute();          // repopulate + show it
+            }
+            return;
+          }
+
+          // ---- Box size for the selected screensaver font ----
+          const int font = id(screensaver_display_time_font);
+          int bw, bh;
+          switch (font) {
+            case 11: bw = 290; bh = 120; break;   // 112px
+            case 12: bw = 316; bh = 205; break;   // 192px (little/no room to roam)
+            default: bw = 190; bh = 82;  break;   // 6 / 72px
+          }
+
+          // ---- Play-area bounds (top-left position range) ----
+          const int X_MIN = ${SS_AREA_LEFT};
+          const int Y_MIN = ${SS_AREA_TOP};
+          const int X_MAX = ${SS_AREA_RIGHT} - bw;
+          const int Y_MAX = ${SS_AREA_BOTTOM} - bh;
+
+          // ---- First activation: hide the stock clock, seed position/velocity ----
+          if (!id(ss_active)) {
+            disp1->send_command("vis text,0");
+            id(ss_x) = (X_MAX > X_MIN) ? (X_MIN + (X_MAX - X_MIN) / 2.0f) : (float)(X_MIN > 0 ? X_MIN : 0);
+            id(ss_y) = (Y_MAX > Y_MIN) ? (Y_MIN + (Y_MAX - Y_MIN) / 3.0f) : (float)Y_MIN;
+            id(ss_vx) = 1.0f;
+            id(ss_vy) = 1.0f;
+            id(ss_active) = true;
+            id(ss_have_prev) = false;
+          }
+
+          // ---- Advance position; bounce at the walls ----
+          const float mspeed = id(screensaver_motion_speed)->state;   // 1..100
+          const float step = 0.2f + mspeed * 0.06f;                   // px per frame
+          bool bounced = false;
+
+          float nx = id(ss_x) + id(ss_vx) * step;
+          if (X_MAX > X_MIN) {
+            if (nx <= X_MIN)      { nx = X_MIN; id(ss_vx) =  1.0f; bounced = true; }
+            else if (nx >= X_MAX) { nx = X_MAX; id(ss_vx) = -1.0f; bounced = true; }
+          } else {
+            nx = (X_MIN > 0 ? X_MIN : 0);   // too wide to move horizontally: pin
+          }
+
+          float ny = id(ss_y) + id(ss_vy) * step;
+          if (Y_MAX > Y_MIN) {
+            if (ny <= Y_MIN)      { ny = Y_MIN; id(ss_vy) =  1.0f; bounced = true; }
+            else if (ny >= Y_MAX) { ny = Y_MAX; id(ss_vy) = -1.0f; bounced = true; }
+          } else {
+            ny = Y_MIN;
+          }
+          id(ss_x) = nx;
+          id(ss_y) = ny;
+          const int ix = (int)nx;
+          const int iy = (int)ny;
+
+          // ---- Color ----
+          if (mode == "${SS_MODE_CONTINUOUS}") {
+            const float cspeed = id(screensaver_color_speed)->state;  // 1..100
+            id(ss_hue) += cspeed * 0.06f;
+          } else {  // On bounce
+            if (bounced || !id(ss_have_prev)) id(ss_hue) += 47.0f;
+          }
+          while (id(ss_hue) >= 360.0f) id(ss_hue) -= 360.0f;
 
           // HSV (S=V=1) -> RGB -> RGB565
-          const float h = id(ss_motion_hue);
-          const float c = 1.0f;
-          const float xx = c * (1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f));
+          const float h = id(ss_hue);
+          const float xx = 1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f);
           float r = 0, g = 0, b = 0;
-          if      (h <  60.0f) { r = c;  g = xx; b = 0;  }
-          else if (h < 120.0f) { r = xx; g = c;  b = 0;  }
-          else if (h < 180.0f) { r = 0;  g = c;  b = xx; }
-          else if (h < 240.0f) { r = 0;  g = xx; b = c;  }
-          else if (h < 300.0f) { r = xx; g = 0;  b = c;  }
-          else                 { r = c;  g = 0;  b = xx; }
-          const uint8_t R = static_cast<uint8_t>(r * 255.0f);
-          const uint8_t G = static_cast<uint8_t>(g * 255.0f);
-          const uint8_t B = static_cast<uint8_t>(b * 255.0f);
+          if      (h <  60.0f) { r = 1;  g = xx; b = 0;  }
+          else if (h < 120.0f) { r = xx; g = 1;  b = 0;  }
+          else if (h < 180.0f) { r = 0;  g = 1;  b = xx; }
+          else if (h < 240.0f) { r = 0;  g = xx; b = 1;  }
+          else if (h < 300.0f) { r = xx; g = 0;  b = 1;  }
+          else                 { r = 1;  g = 0;  b = xx; }
+          const uint8_t R = (uint8_t)(r * 255.0f);
+          const uint8_t G = (uint8_t)(g * 255.0f);
+          const uint8_t B = (uint8_t)(b * 255.0f);
           const uint16_t color = ((R & 0xF8) << 8) | ((G & 0xFC) << 3) | (B >> 3);
 
-          if (color == id(ss_motion_last_color)) return;  // no visible change; skip redraw
-          id(ss_motion_last_color) = color;
-          disp1->send_command_printf("text.pco=%u", color);
+          const uint16_t bco = id(screensaver_background_color);
+
+          // ---- Erase previous frame (over-print old glyphs in background color) ----
+          if (id(ss_have_prev)) {
+            disp1->send_command_printf("xstr %d,%d,%d,%d,%d,%u,%u,1,1,3,\"%s\"",
+                id(ss_prev_x), id(ss_prev_y), id(ss_prev_w), id(ss_prev_h),
+                id(ss_prev_font), bco, bco, id(ss_prev_str).c_str());
+          }
+
+          // ---- Draw the clock at the new position ----
+          disp1->send_command_printf("xstr %d,%d,%d,%d,%d,%u,%u,1,1,3,\"%s\"",
+              ix, iy, bw, bh, font, color, bco, id(ss_time_str).c_str());
+
+          // ---- Remember this frame so we can erase it next time ----
+          id(ss_prev_x) = ix;
+          id(ss_prev_y) = iy;
+          id(ss_prev_w) = bw;
+          id(ss_prev_h) = bh;
+          id(ss_prev_font) = font;
+          id(ss_prev_str) = id(ss_time_str);
+          id(ss_have_prev) = true;

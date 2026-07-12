@@ -71,8 +71,20 @@ script:
               time_format_str_sleep.erase(time_format_str_sleep.begin());
             while (!time_format_str_sleep.empty() && time_format_str_sleep.back() == ' ')
               time_format_str_sleep.pop_back();
-            disp1->set_component_text("text", now.strftime(time_format_str_sleep).c_str());
-            disp1->show_component("text");
+            const std::string sleep_str = now.strftime(time_format_str_sleep);
+
+            // When a screensaver motion mode is active, the animator owns the display
+            // (it draws the clock via xstr at a moving position). Just publish the
+            // current string for it and leave the stock centered component hidden.
+            bool animator_owns = false;
+#ifdef NSPANEL_EASY_ADDON_SCREENSAVER_MOTION
+            id(ss_time_str) = sleep_str;
+            animator_owns = (id(screensaver_color_mode)->state != "Off");
+#endif
+            if (!animator_owns) {
+              disp1->set_component_text("text", sleep_str.c_str());
+              disp1->show_component("text");
+            }
           }
 
           // Resolve %p for home page — strip from time string, set meridiem component separately

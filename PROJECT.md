@@ -46,10 +46,25 @@ Movement is stepwise at a low frame rate; fine because the target is deliberatel
     Continuous mode; only redraws on actual color change. Default mode Off = no behaviour change.
   - Note: in Phase 2 only "Continuous shift" is visible; "On bounce" needs motion (Phase 3).
   - Code-only, no TFT rebuild.
-- **Phase 3 — Bounce motion** *(not started)*
-  - Add Motion Speed number + the `xstr`/`fill` animation loop; bounce the time around,
-    wire "On bounce" color changes. Hide the static `text` component during bounce mode.
-  - Code-only *if* on-device verification of serial `xstr`/`fill` holds (high confidence).
+- **Phase 3 — Bounce motion** *(DONE — pending on-device test)*
+  - Animation engine added to `nspanel_esphome_addon_screensaver_motion.yaml`: a 100 ms
+    interval moves the clock, bounces it off the play-area walls, and draws it via `xstr`,
+    erasing the previous frame by over-printing it in the background color.
+  - **Both** moving modes now animate: "Continuous shift" = bounce + smooth color cycle;
+    "On bounce" = bounce + color change on each wall hit. Motion Speed drives both.
+    (ASSUMPTION flagged to user: Continuous shift now moves too, where in Phase 2 it was
+    stationary. Trivial to revert to stationary if that's not wanted.)
+  - `datetime.yaml` publishes the HH:MM string to `ss_time_str` and, in a moving mode,
+    leaves the stock centered `text` component hidden so the animator owns the display.
+    Off mode restores and repopulates the stock component.
+  - Font IDs: 72px=6, 112px=11, 192px=12. Box sized per font. At 192px the text is wider
+    than the screen, so horizontal travel is pinned (vertical bounce only) — use 72px for
+    the best DVD effect.
+  - Play area (tunable substitutions): x 0..320, y 40..440 (insets clear the chips row and
+    the bottom hardware-button bars).
+  - Code-only, no TFT rebuild. On-device risks to watch: font anti-aliasing could leave
+    faint trails with the over-print erase (fallback: `fill` the old box instead), and
+    serial `xstr` throughput at the chosen frame rate.
 
 ## Notes / Architecture
 
