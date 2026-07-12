@@ -77,10 +77,10 @@ script:
             // (it draws the clock via xstr at a moving position). Just publish the
             // current string for it and leave the stock centered component hidden.
             bool animator_owns = false;
-#ifdef NSPANEL_EASY_ADDON_SCREENSAVER_MOTION
+            #ifdef NSPANEL_EASY_ADDON_SCREENSAVER_MOTION
             id(ss_time_str) = sleep_str;
             animator_owns = (id(screensaver_color_mode)->state != "Off");
-#endif
+            #endif
             if (!animator_owns) {
               disp1->set_component_text("text", sleep_str.c_str());
               disp1->show_component("text");
